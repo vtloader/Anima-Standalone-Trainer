@@ -142,7 +142,10 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--flash_attn",
         action="store_true",
-        help="Use Flash Attention for DiT self/cross-attention (requires flash-attn package).",
+        help=(
+            "Use Flash Attention for DiT self/cross-attention. CUDA requires the flash-attn package; "
+            "on Ascend NPU the built-in torch_npu fused attention operator is used instead."
+        ),
     )
     parser.add_argument(
         "--freeze_inserted_only_training",

@@ -128,8 +128,9 @@ def unsloth_checkpoint(function, *args):
 #
 # Keep backend selection centralized here so the rest of the model only needs to
 # call one attention wrapper. We currently prefer FA3 when available, then fall
-# back to FA2. This keeps the integration easy to extend later if we decide to
-# add FA4 support here as well.
+# back to FA2 for CUDA. On Ascend NPU, torch_npu's fused attention operator
+# (npu_fusion_attention) provides the equivalent flash attention kernel, so the
+# same --flash_attn switch works there without the flash-attn package.
 def _load_flash_attn_backend():
     try:
         flash_attn_interface = importlib.import_module("flash_attn_interface")
@@ -145,8 +146,27 @@ def _load_flash_attn_backend():
         return None, None
 
 
-FLASH_ATTN_BACKEND, _flash_attn_func = _load_flash_attn_backend()
-FLASH_ATTN_AVAILABLE = _flash_attn_func is not None
+def _load_npu_fusion_attention():
+    try:
+        import torch_npu
+
+        if torch.npu.is_available() and hasattr(torch_npu, "npu_fusion_attention"):
+            return torch_npu.npu_fusion_attention
+    except Exception:
+        pass
+    return None
+
+
+_CUDA_FLASH_ATTN_BACKEND, _flash_attn_func = _load_flash_attn_backend()
+_npu_fusion_attention = _load_npu_fusion_attention()
+
+_available_backends = []
+if _flash_attn_func is not None:
+    _available_backends.append(_CUDA_FLASH_ATTN_BACKEND)
+if _npu_fusion_attention is not None:
+    _available_backends.append("npu")
+FLASH_ATTN_BACKEND = "/".join(_available_backends) if _available_backends else None
+FLASH_ATTN_AVAILABLE = bool(_available_backends)
 
 # SageAttention support
 try:
@@ -178,12 +198,47 @@ def sage_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H_
     return rearrange(out, "b s h d -> b s (h d)")
 
 
+def npu_flash_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H_D: torch.Tensor) -> torch.Tensor:
+    """Computes multi-head attention using the Ascend NPU fused attention operator.
+
+    Input format: (batch, seq_len, n_heads, head_dim)
+    Output format: (batch, seq_len, n_heads * head_dim) — matches torch_attention_op output.
+    """
+    q = q_B_S_H_D.contiguous()
+    k = k_B_S_H_D.contiguous()
+    v = v_B_S_H_D.contiguous()
+    softmax_scale = 1.0 / math.sqrt(q.shape[-1])
+    out = _npu_fusion_attention(
+        q,
+        k,
+        v,
+        head_num=q.shape[-2],
+        input_layout="BSND",
+        scale=softmax_scale,
+    )[0]
+    return rearrange(out, "b s h d -> b s (h d)")
+
+
 def flash_attention_op(q_B_S_H_D: torch.Tensor, k_B_S_H_D: torch.Tensor, v_B_S_H_D: torch.Tensor) -> torch.Tensor:
     """Computes multi-head attention using Flash Attention, with automatic fallback ONLY on missing kernel.
 
     Input format: (batch, seq_len, n_heads, head_dim)
     Output format: (batch, seq_len, n_heads * head_dim) — matches torch_attention_op output.
     """
+    # On Ascend NPU use torch_npu's fused attention operator (the NPU flash attention kernel).
+    if q_B_S_H_D.device.type == "npu":
+        if _npu_fusion_attention is None:
+            return torch_attention_op(q_B_S_H_D, k_B_S_H_D, v_B_S_H_D)
+        try:
+            return npu_flash_attention_op(q_B_S_H_D, k_B_S_H_D, v_B_S_H_D)
+        except RuntimeError as e:
+            logger.warning(f"NPU fused attention failed ({e}), falling back to PyTorch SDPA")
+            return torch_attention_op(q_B_S_H_D, k_B_S_H_D, v_B_S_H_D)
+
+    if _flash_attn_func is None:
+        # No CUDA flash-attn backend installed; fall back to SDPA.
+        return torch_attention_op(q_B_S_H_D, k_B_S_H_D, v_B_S_H_D)
+
     try:
         # The backend is selected once at import time.
         out = _flash_attn_func(q_B_S_H_D, k_B_S_H_D, v_B_S_H_D)
@@ -1315,7 +1370,9 @@ class MiniTrainDIT(nn.Module):
     def set_flash_attn(self, use_flash_attn: bool):
         """Toggle flash attention for all DiT blocks."""
         if use_flash_attn and not FLASH_ATTN_AVAILABLE:
-            raise ImportError("flash_attn package is required for --flash_attn but is not installed")
+            raise ImportError(
+                "--flash_attn requires the flash-attn package (CUDA) or an available Ascend NPU (torch_npu)"
+            )
         if use_flash_attn:
             logger.info(f"Using Flash Attention backend: {FLASH_ATTN_BACKEND}")
         attn_op = flash_attention_op if use_flash_attn else torch_attention_op

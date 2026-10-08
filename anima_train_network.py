@@ -90,7 +90,10 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
                     raise ImportError("No supported Flash Attention backend is installed")
                 logger.info(f"Flash Attention enabled for DiT blocks ({anima_models.FLASH_ATTN_BACKEND})")
             except ImportError:
-                logger.warning("flash_attn package not installed, falling back to PyTorch SDPA")
+                logger.warning(
+                    "No Flash Attention backend available (flash-attn package or Ascend NPU fused attention), "
+                    "falling back to PyTorch SDPA"
+                )
                 args.flash_attn = False
                 
         if getattr(args, 'blockwise_fused_optimizers', False):

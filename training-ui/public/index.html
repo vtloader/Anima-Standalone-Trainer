@@ -342,7 +342,7 @@
                         </div>
                         <div class="form-group">
                             <label><input type="checkbox" id="cfg-flash-attn"> Flash Attention</label>
-                            <small>Requires flash-attn package.</small>
+                            <small>CUDA: requires flash-attn package. Ascend NPU: uses the built-in fused attention operator.</small>
                         </div>
                         <div id="group-torch-compile" class="form-group">
                             <label><input type="checkbox" id="cfg-torch-compile"> Torch Compile</label>
@@ -696,7 +696,7 @@
                             <div style="display: flex; gap: 15px; margin-top: 12px;">
                                 <div class="form-group">
                                     <label><input type="checkbox" id="gen-flash-attn"> Flash Attention</label>
-                                    <small>Requires flash-attn.</small>
+                                    <small>CUDA: requires flash-attn. Ascend NPU: built-in fused attention operator.</small>
                                 </div>
                                 <div class="form-group">
                                     <label><input type="checkbox" id="gen-sage-attn"> Sage Attention</label>
